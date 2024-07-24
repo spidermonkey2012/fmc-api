@@ -12,6 +12,283 @@ import requests
 import traceback
 
 
+
+
+#
+#
+# FMC Object
+class FMC(object):
+    def __init__(self):
+        self.hostname = ''
+        self.username = ''
+        self.password = ''
+        self.serial_number = ""
+        self.uuid = ""
+        self.version = ""
+        self.train = float()
+        self.patch = ""
+        self.date = datetime.today().strftime('%Y-%m-%d %H:%M')
+        self.id = hashlib.md5((f'{str(time.time())}').encode('utf-8')).hexdigest()
+        self.conn_handler = netmiko.ConnectHandler
+        self.session = requests.session()
+        self.session.auth = (self.username, self.password)
+        self.session.headers = {'Content-Type': 'application/json','Accept': 'application/json'}
+        self.domains = ''
+        self.api_uuid = ''
+    #
+    #
+    # Define Generate Access Token Function
+    def access_token(self):
+        auth_url = f'{server}/api/fmc_platform/v1/auth/generatetoken'
+        try:
+            # REST call with SSL verification turned off:
+            r = self.post(auth_url, headers=self.headers, verify=False)
+            print(r.status_code)
+            if r.status_code == 401:
+                return False
+            else:
+                self.session.headers['X-auth-access-token'] = r.headers['X-auth-access-token']
+                self.domains = json.loads(r.headers['DOMAINS'])
+                return True
+        except:
+            print (f'Error in generating auth token --> {traceback.format_exc()}')
+            print(r.headers)
+            return False
+
+
+    # Get FMC IP and Credentials
+    def get_details(self):
+        if self.hostname != '':
+            print ('''
+***********************************************************************************************
+*                           Provide FMC hostname and credentials                              *
+*_____________________________________________________________________________________________*
+*                                                                                             *
+* USER INPUT NEEDED:                                                                          *
+*                                                                                             *
+*  1. Hostname for FMC server (hostname.domain.com)                                           *
+*                                                                                             *
+*  2. API Username                                                                            *
+*                                                                                             *
+*  3. API Password                                                                            *
+*                                                                                             *
+***********************************************************************************************
+''')
+            print(f'\nCurrent FMC: {self.hostname}\n')
+            while True:
+                choice = input('Would you like to enter a different FMC? [y/N]: ').lower()
+                if choice in (['yes','ye','y']):
+
+                    while True:
+                        # Request FMC server Hostname
+                        self.hostname = input('Please enter FMC hostname: ').lower().strip()
+
+                        # Validate FQDN
+                        if self.hostname[-1] == '/':
+                            self.hostname = self.hostname[:-1]
+                        if '//' in self.hostname:
+                            self.hostname = self.hostname.split('//')[-1]
+
+                        # Perform Test Connection To FQDN
+                        s = socket.socket()
+                        print(f'Attempting to connect to {self.hostname} on port 443')
+                        try:
+                            s.connect((self.hostname, 443))
+                            print(f'Connecton successful to {self.hostname} on port 443')
+                            break
+                        except:
+                            print(f'Connection to {self.hostname} on port 443 failed: {traceback.format_exc()}\n\n')
+
+                    # Adding HTTPS to Server for URL
+                    self.hostname = f'https://{self.hostname}'
+                    self.session.headers = {'Content-Type': 'application/json','Accept': 'application/json'}
+
+                    # Request Username and Password without showing password in clear text
+                    self.username = input('Please enter API username: ').strip()
+                    self.password = define_password()
+                elif choice in (['no','n','']):
+                    choice = input('Would you like to enter different username/password? [y/N]: ').lower()
+                    if choice in (['yes','ye','y']):
+                        self.username = input('Please enter API username: ').strip()
+                        self.password = define_password()
+                    break
+                else:
+                    print('Invalid Selection...\n')
+        else:
+            print ('''
+***********************************************************************************************
+*                           Provide FMC hostname and credentials                              *
+*_____________________________________________________________________________________________*
+*                                                                                             *
+* USER INPUT NEEDED:                                                                          *
+*                                                                                             *
+*  1. Hostname for FMC server (hostname.domain.com)                                           *
+*                                                                                             *
+*  2. API Username                                                                            *
+*                                                                                             *
+*  3. API Password                                                                            *
+*                                                                                             *
+***********************************************************************************************
+''')
+
+            while True:
+                # Request FMC server FQDN
+                self.hostname = input('Please enter FMC hostname: ').lower().strip()
+                if self.hostname == '':
+                    continue
+                # Validate FQDN
+                if self.hostname[-1] == '/':
+                    self.hostname = self.hostname[:-1]
+                if '//' in self.hostname:
+                    self.hostname = self.hostname.split('//')[-1]
+
+                # Perform Test Connection To FQDN
+                s = socket.socket()
+                print(f'Attempting to connect to {self.hostname} on port 443')
+                try:
+                    s.connect((self.hostname, 443))
+                    print(f'Connecton successful to {self.hostname} on port 443')
+                    break
+                except:
+                    print(f'Connection to {self.hostname} on port 443 failed: {traceback.format_exc()}\n\n')
+
+            # Adding HTTPS to Server for URL
+            self.hostname = f'https://{self.hostname}'
+            self.session.headers = {'Content-Type': 'application/json','Accept': 'application/json'}
+
+            # Request Username and Password without showing password in clear text
+            self.username = input('Please enter API username: ').strip()
+            self.password = define_password()
+
+
+        if len(self.domains) > 1:
+            self.api_uuid = select('Domain',self.domains)['uuid']
+        else:
+            self.api_uuid = self.domains[0]['uuid']
+
+        return
+
+
+    #
+    # Collects and returns items from all pages
+    def get_items(self,url):
+        try:
+            print(f'COLLECTING PAGE... {url}')
+            # REST call with SSL verification turned off
+            r = self.session.get(url, allow_redirects=False, verify=False)
+            status_code = r.status_code
+            #print(json.dumps(r.json(),indent=4))
+            try:
+                temp_list = r.json()['items']
+            except:
+                return []
+            json_resp = r.json()
+            #print(f'Json: {json_resp}')
+            if status_code == 200:
+                while 'next' in json_resp['paging']:
+                    url_get = json_resp['paging']['next'][0]
+                    print(f'*\n*\nCOLLECTING NEXT PAGE... {url_get}')
+                    try:
+                        # REST call with SSL verification turned off
+                        r = self.session.get(url_get, allow_redirects=False, verify=False)
+                        status_code = r.status_code
+                        json_resp = r.json()
+                        if status_code == 200:
+                            # Loop for First Page of Items
+                            for item in json_resp['items']:
+                                # Append Items to New Dictionary
+                                temp_list.append(item)
+                    except requests.exceptions.HTTPError as err:
+                        print (f'Error in connection --> {traceback.format_exc()}')
+        except requests.exceptions.HTTPError as err:
+            print (f'Error in connection --> {traceback.format_exc()}')
+        return temp_list
+
+
+
+    def get(self,url):
+        try:
+            #print(f'\nPerforming GET to: {url}...')
+            r = self.session.get(url, allow_redirects=False, verify=False)
+            if r.status_code == 200:
+                return r.text
+            elif r.status_code == 401:
+                print("Token expired, renewing...")
+                self.access_token()
+                r = self.session.get(url, allow_redirects=False, verify=False)
+                if r.status_code == 200:
+                    return r.text
+                else :
+                    print (f'Error occurred in GET --> {r.text}')
+                    r.raise_for_status()
+            else :
+                print (f'Error occurred in GET --> {r.text}')
+                r.raise_for_status()
+        except requests.exceptions.HTTPError:
+            print (f'Error in connection --> {traceback.format_exc()}')
+            return None
+
+    def post(self,url,data):
+        try:
+            #print(f'\nPerforming POST to: {url}...')
+            r = self.session.post(url, data, allow_redirects=False, verify=False)
+            if r.status_code == 200 or r.status_code == 201:
+                return r.text
+            elif r.status_code == 401:
+                print("Token expired, renewing...")
+                self.access_token()
+                r = self.session.post(url, allow_redirects=False, verify=False)
+                if r.status_code == 200 or r.status_code == 201:
+                    return r.text
+                else :
+                    print (f'Error occurred in GET --> {r.text}')
+                    r.raise_for_status()
+            else :
+                print (f'Error occurred in POST --> {r.text}')
+                r.raise_for_status()
+                print(r.status_code)
+        except requests.exceptions.HTTPError:
+            print (f'Error in connection --> {traceback.format_exc()}')
+            return None
+
+    def put(self,url,data):
+        try:
+            #print(f'\nPerforming PUT to: {url}...')
+            r = self.session.put(url, data, allow_redirects=False, verify=False)
+            if r.status_code == 200:
+                return r.text
+            elif r.status_code == 401:
+                print("Token expired, renewing...")
+                self.access_token()
+                r = self.session.put(url, allow_redirects=False, verify=False)
+                if r.status_code == 200:
+                    return r.text
+                else :
+                    print (f'Error occurred in GET --> {r.text}')
+                    r.raise_for_status()
+            else :
+                print (f'Error occurred in PUT --> {r.text}')
+                r.raise_for_status()
+                print(r.status_code)
+        except requests.exceptions.HTTPError:
+            print (f'Error in connection --> {traceback.format_exc()}')
+            return None
+
+    def cli_login(self):
+        try:
+            print(f'Performing CLI Login...')
+            self.conn = self.conn_handler(ip=self.hostname,
+                                          device_type='linux',
+                                          username=self.username,
+                                          password=self.password,
+                                          global_delay_factor=8
+                                         )
+        except:
+            print (f'Error in connection --> {traceback.format_exc()}')
+            return False
+
+
+
 #
 #
 #
@@ -48,9 +325,6 @@ def access_token(server,headers,username,password):
         return None
 
 
-
-#
-#
 #
 # Get FMC IP and Credentials
 def get_fmc_details(server,headers,username,password):
@@ -157,6 +431,7 @@ def get_fmc_details(server,headers,username,password):
         password = define_password()
 
     return server,headers,username,password
+
 
 
 
@@ -655,3 +930,21 @@ def put_bulk_acp_rules(server,headers,username,password,API_UUID,acp_id,put_data
     # End
     finally:
         if r: r.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
